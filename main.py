@@ -1,58 +1,61 @@
 from fastapi import FastAPI, Request, HTTPException, Response
 import httpx
 import os
+import logging
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
-# Адрес Agnes AI, к которому будем перенаправлять запросы
 AGNES_API_BASE = "https://apihub.agnes-ai.com"
-
-# Получаем ключ из переменных окружения
 AGNES_API_KEY = os.getenv("AGNES_API_KEY")
 
 if not AGNES_API_KEY:
-    raise ValueError("AGNES_API_KEY не задан в переменных окружения")
-
-# Создаём HTTP-клиент для переадресации
-client = httpx.AsyncClient(base_url=AGNES_API_BASE, timeout=300.0)
+    raise ValueError("AGNES_API_KEY не задан")
 
 
 @app.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
 async def proxy(request: Request, path: str):
-    """Универсальный прокси для Agnes AI"""
-    
-    # Формируем URL для перенаправления
-    target_url = f"/{path}"
+    # Формируем целевой URL
+    target_url = f"{AGNES_API_BASE}/{path}"
     if request.url.query:
         target_url += f"?{request.url.query}"
 
-    # Копируем заголовки, подменяя авторизацию
-    headers = dict(request.headers)
-    headers["Authorization"] = f"Bearer {AGNES_API_KEY}"
-    headers.pop("host", None)  # Убираем host, чтобы не мешал
+    # Явно задаём заголовки, которые Cloudflare пропускает
+    headers = {
+        "Authorization": f"Bearer {AGNES_API_KEY}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin": "https://apihub.agnes-ai.com",
+        "Referer": "https://apihub.agnes-ai.com/",
+    }
 
-    # Читаем тело запроса
     body = await request.body()
+    logger.info(f"→ {request.method} {target_url}")
 
-    # Отправляем запрос к Agnes AI
-    try:
-        agnes_response = await client.request(
-            method=request.method,
-            url=target_url,
-            headers=headers,
-            content=body,
-        )
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=502, detail=f"Ошибка при запросе к Agnes AI: {e}")
+    async with httpx.AsyncClient(timeout=300.0) as client:
+        try:
+            resp = await client.request(
+                method=request.method,
+                url=target_url,
+                headers=headers,
+                content=body,
+            )
+        except httpx.RequestError as e:
+            logger.error(f"Ошибка запроса: {e}")
+            raise HTTPException(status_code=502, detail=str(e))
 
-    # Возвращаем ответ Agnes AI клиенту
+    logger.info(f"← {resp.status_code} {target_url}")
+
+    # Возвращаем ответ Agnes AI
     return Response(
-        content=agnes_response.content,
-        status_code=agnes_response.status_code,
-        headers=dict(agnes_response.headers),
+        content=resp.content,
+        status_code=resp.status_code,
+        headers={
+            "Content-Type": resp.headers.get("Content-Type", "application/json"),
+            "Access-Control-Allow-Origin": "*",
+        },
     )
-
-
-@app.on_event("shutdown")
-async def shutdown_event():
-    await client.aclose()
