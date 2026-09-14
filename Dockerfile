@@ -2,10 +2,18 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
+# Устанавливаем зависимости от root
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py .
+# Создаём непривилегированного пользователя
+RUN useradd --create-home --shell /bin/bash appuser
+
+# Копируем код и даём права пользователю
+COPY --chown=appuser:appuser main.py .
+
+# Переключаемся на непривилегированного пользователя
+USER appuser
 
 EXPOSE 8080
 
